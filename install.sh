@@ -101,9 +101,6 @@ echo "KEYMAP=uk" > /etc/vconsole.conf
 ln -sf /usr/share/zoneinfo/Europe/London /etc/localtime
 hwclock --systohc
 
-# ---------- network ----------
-systemctl enable NetworkManager.service
-
 # ---------- user + passwords (interactive) ----------
 log "Creating user 'lied' and setting password"
 id -u lied &>/dev/null || useradd -m -G wheel,audio,video,storage,power,network,optical,scanner,rfkill -s /bin/bash lied
