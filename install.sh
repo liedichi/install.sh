@@ -74,6 +74,9 @@ if ! grep -Eq '^\s*\[multilib\]' /etc/pacman.conf; then
 fi
 pacman -Syyu --noconfirm
 
+# ---- ensure mkinitcpio exists BEFORE editing it ----
+pacman -S --noconfirm mkinitcpio
+
 # ---- system basics ----
 echo "gaming-rig" > /etc/hostname
 echo "en_GB.UTF-8 UTF-8" > /etc/locale.gen
@@ -116,18 +119,17 @@ pacman -S --noconfirm \
   polkit-gnome sddm firefox discord \
   thunar thunar-archive-plugin thunar-volman tumbler ffmpegthumbnailer \
   ffmpeg libheif gvfs gvfs-mtp gvfs-smb gvfs-nfs udisks2 polkit \
-  nano curl wget unzip unrar p7zip rsync htop btop fastfetch fzf ripgrep fd bat eza tree \
-  zsh starship zellij tmux zoxide git-delta jq yq \
+  nano curl wget unzip unrar p7zip rsync htop btop fastfetch fzf ripgrep fd bat eza tree jq yq git-delta \
+  zsh starship zellij tmux zoxide \
   ttf-jetbrains-mono-nerd noto-fonts noto-fonts-cjk noto-fonts-emoji ttf-dejavu ttf-liberation ttf-roboto \
-  papirus-icon-theme gtk3 gtk4 qt6-base qt6-wayland qt5-base qt5-wayland kvantum \
-  gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav \
-  vulkan-icd-loader vulkan-tools \
-  lib32-vulkan-icd-loader \
-  steam wine wine-gecko wine-mono lutris protontricks gamemode lib32-gamemode \
-  mangohud lib32-mangohud vkbasalt lib32-vkbasalt gamescope goverlay nvtop \
+  papirus-icon-theme gtk3 gtk4 qt6-base qt6-wayland qt5-base qt5-wayland kvantum qt6ct qt5ct \
+  gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav gst-vaapi \
+  vulkan-icd-loader vulkan-tools lib32-vulkan-icd-loader \
+  steam wine wine-gecko wine-mono lutris gamemode lib32-gamemode \
+  mangohud lib32-mangohud gamescope goverlay nvtop \
   flatpak ntfs-3g nvme-cli xfsprogs btrfs-progs dosfstools \
-  cpupower lm_sensors thermald irqbalance zram-generator avahi nfs-utils \
-  mako kanshi openssh iperf3 yt-dlp aria2 samba smbclient nss-mdns
+  cpupower lm_sensors thermald irqbalance zram-generator avahi nss-mdns \
+  mako kanshi openssh iperf3 yt-dlp aria2 samba smbclient
 
 # remove wofi (we'll use rofi-wayland from AUR)
 pacman -Q wofi &>/dev/null && pacman -Rns --noconfirm wofi || true
@@ -176,6 +178,7 @@ sudo -u lied bash -c 'mkdir -p $HOME/.cache/yay && cd $HOME/.cache/yay && rm -rf
 sudo -u lied yay -S --needed --noconfirm \
   rofi-wayland hyprpicker raw-thumbnailer thunar-vcs-plugin \
   ghostty-bin openasar-bin equicord protonup-ng \
+  protontricks vkbasalt lib32-vkbasalt \
   catppuccin-ghostty-git catppuccin-gtk-theme-mocha catppuccin-kvantum-theme-git catppuccin-cursors catppuccin-sddm-theme-git
 
 # Apply OpenAsar + Equicord
