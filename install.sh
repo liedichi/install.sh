@@ -104,6 +104,7 @@ BL
 # ---- official repo packages ----
 pacman -S --noconfirm \
   intel-ucode \
+  nvidia-dkms nvidia-utils nvidia-settings lib32-nvidia-utils \
   wayland wayland-protocols xdg-utils xdg-user-dirs \
   xdg-desktop-portal xdg-desktop-portal-hyprland \
   xorg-xwayland hyprland hyprpaper hyprcursor \
@@ -117,9 +118,9 @@ pacman -S --noconfirm \
   zsh starship zellij tmux zoxide git-delta jq yq \
   ttf-jetbrains-mono-nerd noto-fonts noto-fonts-cjk noto-fonts-emoji ttf-dejavu ttf-liberation ttf-roboto \
   papirus-icon-theme gtk3 gtk4 qt6-base qt6-wayland qt5-base qt5-wayland kvantum \
-  gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav gst-vaapi \
-  vulkan-icd-loader vulkan-tools vulkan-nvidia \
-  lib32-vulkan-icd-loader lib32-vulkan-nvidia lib32-nvidia-utils \
+  gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav \
+  vulkan-icd-loader vulkan-tools \
+  lib32-vulkan-icd-loader \
   steam wine wine-gecko wine-mono lutris protontricks gamemode lib32-gamemode \
   mangohud lib32-mangohud vkbasalt lib32-vkbasalt gamescope goverlay nvtop \
   flatpak ntfs-3g nvme-cli xfsprogs btrfs-progs dosfstools \
