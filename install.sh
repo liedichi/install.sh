@@ -7,16 +7,16 @@
 set -Eeuo pipefail
 trap 'echo -e "\033[0;31m[ERROR]\033[0m Failed at line $LINENO"; exit 1' ERR
 
-# Colors
+# ---- Colors ----
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-# Logging + warnings counter
+# ---- Logging + warning counter ----
 WARNINGS=0
 log()  { echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*"; ((WARNINGS++)); }
 die()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
-# -------- Stage selection (explicit flag preferred) --------
+# ---- Stage selection (explicit flag preferred; fallback auto-detect) ----
 MODE=""
 case "${1:-}" in
   --stage1) MODE=stage1; shift ;;
@@ -26,7 +26,19 @@ if [[ -z "$MODE" ]]; then
   if [[ -d /run/archiso ]]; then MODE=stage1; else MODE=stage2; fi
 fi
 
-# -------- Stage 1: run only from Live ISO --------
+# ---- Per-stage logging ----
+if [[ "$MODE" == "stage1" ]]; then
+  LOGFILE="/root/arch-install.log"           # lives in ISO RAM
+  exec > >(tee -a "$LOGFILE") 2>&1
+else
+  LOGFILE="/var/log/installer.log"           # persists after install
+  mkdir -p "$(dirname "$LOGFILE")"
+  exec > >(tee -a "$LOGFILE") 2>&1
+fi
+
+# =============================================================================
+# STAGE 1 (Live ISO): partition, format, mount, base install, chroot -> Stage 2
+# =============================================================================
 if [[ "$MODE" == "stage1" ]]; then
   log "Running Stage 1 (Live ISO): Disk partitioning and base install"
 
@@ -39,7 +51,7 @@ if [[ "$MODE" == "stage1" ]]; then
   wipefs -af "$INSTALL_DISK" || true
   sgdisk --zap-all "$INSTALL_DISK" || true
 
-  log "Creating GPT partitions (1: EFI 1GiB, 2: root XFS)"
+  log "Creating GPT: 1) EFI 1GiB (ef00)  2) ROOT XFS (8300)"
   sgdisk -n 1:0:+1GiB -t 1:ef00 -c 1:"EFI System" "$INSTALL_DISK"
   sgdisk -n 2:0:0     -t 2:8300 -c 2:"Arch Linux" "$INSTALL_DISK"
 
@@ -62,44 +74,32 @@ if [[ "$MODE" == "stage1" ]]; then
   pacstrap -K /mnt base base-devel linux-zen linux-zen-headers linux-firmware \
     networkmanager sudo neovim git efibootmgr
 
-  log "Generating fstab (noatime)"
+  log "Generating fstab (switch relatime -> noatime)"
   genfstab -U /mnt >> /mnt/etc/fstab
   sed -i 's/\<relatime\>/noatime/g' /mnt/etc/fstab || true
 
-  log "Copying this script into target and entering chroot (Stage 2)"
+  # Persist Stage 1 log into target so the final log is continuous
+  mkdir -p /mnt/var/log
+  cp -f "$LOGFILE" /mnt/var/log/installer.log || true
+
+  log "Copying installer into target and entering chroot (Stage 2)"
   cat "$0" > /mnt/root/install.sh
   chmod +x /mnt/root/install.sh
 
-  arch-chroot /mnt /bin/bash -c "/root/install.sh --stage2"
+  # Run the file directly so functions are available in Stage 2
+  arch-chroot /mnt /bin/bash /root/install.sh --stage2
 
-  # Final summary + reboot prompt after returning from Stage 2
-  echo
-  echo "========================================"
-  if [[ "$WARNINGS" -gt 0 ]]; then
-      echo -e "⚠  ${YELLOW}Installation completed with $WARNINGS warning(s).${NC}"
-      echo -e "   Review [WARN] messages above before rebooting."
-  else
-      echo -e "✅ ${GREEN}Installation completed successfully with no warnings.${NC}"
-  fi
-  echo "========================================"
-  echo
-  read -rp "Press Y to reboot now, or any other key to stay in shell: " confirm
-  if [[ "$confirm" =~ ^[Yy]$ ]]; then
-      log "Rebooting..."
-      reboot
-  else
-      log "You chose not to reboot. You can manually reboot later."
-  fi
+  # Stage 2 does the summary & reboot prompt. We're done here.
   exit 0
 fi
 
-# -------- Stage 2: system configuration (runs inside chroot/installed system) --------
+# =============================================================================
+# STAGE 2 (in chroot): system config, packages, NVIDIA, desktop, finalize
+# =============================================================================
 log "Starting Arch Linux Zen Gaming Auto-Install Script (Stage 2)"
 
-# =============================================================================
-# SYSTEM CONFIGURATION
-# =============================================================================
-log "Configuring system settings..."
+# ---- System settings ----
+log "Configuring hostname, locale, timezone, console..."
 echo "gaming-rig" > /etc/hostname
 
 cat > /etc/locale.gen <<'EOF'
@@ -111,12 +111,9 @@ echo "KEYMAP=uk" > /etc/vconsole.conf
 ln -sf /usr/share/zoneinfo/Europe/London /etc/localtime
 hwclock --systohc
 
-# =============================================================================
-# BOOTLOADER CONFIGURATION
-# =============================================================================
-log "Configuring systemd-boot..."
+# ---- Bootloader (systemd-boot) ----
+log "Installing systemd-boot..."
 bootctl install
-
 ROOT_DEVICE="$(findmnt -no SOURCE /)"
 ROOT_PARTUUID="$(blkid -s PARTUUID -o value "$ROOT_DEVICE")"
 ROOT_FSTYPE="$(findmnt -no FSTYPE /)"
@@ -135,24 +132,40 @@ initrd /initramfs-linux-zen.img
 options root=PARTUUID=${ROOT_PARTUUID} rw rootfstype=${ROOT_FSTYPE} nvidia_drm.modeset=1 nvidia_drm.fbdev=1
 EOF
 
-# =============================================================================
-# NETWORK CONFIGURATION
-# =============================================================================
-log "Configuring network..."
+# ---- Network ----
+log "Enabling NetworkManager..."
 systemctl enable NetworkManager.service
 
-# =============================================================================
-# USER CREATION
-# =============================================================================
-log "Creating user account..."
+# ---- User creation (interactive password) ----
+log "Creating user 'lied' and setting password..."
 id -u lied &>/dev/null || useradd -m -G wheel,audio,video,storage,power,network,optical,scanner,rfkill -s /bin/bash lied
-echo "lied:625816" | chpasswd
+
+while :; do
+  echo
+  read -rs -p "Set password for user 'lied': " _PW1; echo
+  read -rs -p "Confirm password for user 'lied': " _PW2; echo
+  if [[ "$_PW1" == "$_PW2" && -n "$_PW1" ]]; then
+    printf 'lied:%s\n' "$_PW1" | chpasswd
+    unset _PW1 _PW2
+    break
+  else
+    echo "Passwords did not match or were empty. Try again."
+  fi
+done
+
 echo "lied ALL=(ALL) ALL" >> /etc/sudoers
 
-# =============================================================================
-# PACKAGE INSTALLATION
-# =============================================================================
-log "Installing base packages..."
+echo
+read -rp "Set a root password? [y/N] " _ans_root
+if [[ "$_ans_root" =~ ^[Yy]$ ]]; then
+  passwd root
+else
+  passwd -l root
+  warn "Root account locked (sudo recommended)."
+fi
+
+# ---- Packages (repo) ----
+log "Syncing and installing packages..."
 pacman -Syu --noconfirm
 pacman -S --noconfirm \
   base-devel \
@@ -185,8 +198,8 @@ pacman -S --noconfirm \
 
 runuser -l lied -c 'xdg-user-dirs-update'
 
-# NVIDIA early KMS + initramfs
-log "Configuring NVIDIA modules and initramfs..."
+# ---- NVIDIA early KMS + initramfs + runtime tweaks ----
+log "Configuring NVIDIA KMS and initramfs..."
 if [[ -f /etc/mkinitcpio.d/linux-zen.preset ]]; then
   sed -i "s/^PRESETS=.*/PRESETS=('default')/" /etc/mkinitcpio.d/linux-zen.preset || true
   sed -i '/^fallback_/d' /etc/mkinitcpio.d/linux-zen.preset || true
@@ -200,26 +213,26 @@ options nouveau modeset=0
 BL_NOUVEAU
 mkinitcpio -P
 
-# Runtime NV tweaks
 cat > /etc/modprobe.d/nvidia-gaming.conf <<'NVIDIA_EOF'
 options nvidia NVreg_PreserveVideoMemoryAllocations=1
 options nvidia NVreg_UsePageAttributeTable=1
 NVIDIA_EOF
 
-# AUR helper (paru)
-log "Installing paru (AUR helper) and AUR packages..."
+# ---- Paru (AUR) + AUR packages ----
+log "Installing paru and AUR packages..."
 pacman -S --needed --noconfirm git base-devel
 echo "%wheel ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/99_wheel_nopasswd
 chmod 440 /etc/sudoers.d/99_wheel_nopasswd
+
 runuser -l lied -c 'if [ ! -d "$HOME/.cache/paru/clone/paru" ]; then mkdir -p $HOME/.cache/paru/clone && cd $HOME/.cache/paru/clone && git clone https://aur.archlinux.org/paru.git && cd paru && makepkg -si --noconfirm; fi'
 runuser -l lied -c 'paru -S --needed --noconfirm nvidia-vaapi-driver dxvk-bin dxvk-nvapi heroic-games-launcher-bin obs-vkcapture ghostty-bin openasar-bin equicord protonup-ng catppuccin-ghostty-git catppuccin-gtk-theme-mocha catppuccin-kvantum-theme-git catppuccin-cursors catppuccin-sddm-theme-git'
 
-# Flatpak / Proton-GE
-log "Configuring Flatpak and Flathub..."
+# ---- Flatpak + Proton-GE ----
+log "Configuring Flathub and Proton-GE..."
 flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 runuser -l lied -c 'protonup -y -t GE-Proton --latest || true'
 
-# Enable services
+# ---- Services ----
 log "Enabling services..."
 systemctl enable NetworkManager.service
 systemctl enable bluetooth.service
@@ -232,8 +245,8 @@ systemctl enable cpupower.service || true
 systemctl enable nvidia-persistenced.service || true
 systemctl enable nvidia-powerd.service || true
 
-# Performance tuning
-log "Applying performance tuning..."
+# ---- Performance tuning ----
+log "Applying kernel/sysctl/IO tuning..."
 cat > /etc/sysctl.d/99-gaming-tweaks.conf <<'SYSCTL_EOF'
 vm.swappiness = 10
 vm.vfs_cache_pressure = 50
@@ -258,7 +271,7 @@ ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/scheduler}="none"
 ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/scheduler}="mq-deadline"
 UDEV_EOF
 
-# SDDM theming with fallback
+# ---- SDDM theme (with fallbacks) ----
 mkdir -p /etc/sddm.conf.d
 THEME_ID="catppuccin-mocha"
 if [[ ! -d "/usr/share/sddm/themes/$THEME_ID" ]]; then
@@ -269,7 +282,7 @@ cat > /etc/sddm.conf.d/theme.conf <<SDDM_EOF
 Current=$THEME_ID
 SDDM_EOF
 
-# GTK / env / Discord overrides
+# ---- User theming / env / Discord wrapper ----
 runuser -l lied -c 'mkdir -p $HOME/.config/gtk-3.0 $HOME/.config/gtk-4.0'
 runuser -l lied -c 'cat > $HOME/.config/gtk-3.0/settings.ini <<'"'"'GTK_EOF'"'"'
 [Settings]
@@ -313,7 +326,7 @@ X-GNOME-UsesNotifications=true
 DISCORD_DESKTOP
 '
 
-# Firefox system policies
+# ---- Firefox system policies ----
 mkdir -p /usr/lib/firefox/distribution
 cat > /usr/lib/firefox/distribution/policies.json <<'FFPOLICY_EOF'
 {
@@ -335,13 +348,13 @@ cat > /usr/lib/firefox/distribution/policies.json <<'FFPOLICY_EOF'
 }
 FFPOLICY_EOF
 
-# Qt theming
+# ---- Qt theming ----
 pacman -S --needed --noconfirm qt6ct qt5ct
 runuser -l lied -c 'mkdir -p $HOME/.config && echo "[General]\nicon_theme=Papirus-Dark" > $HOME/.config/qt6ct.conf'
 runuser -l lied -c 'mkdir -p $HOME/.config && echo "[General]\nicon_theme=Papirus-Dark" > $HOME/.config/qt5ct.conf'
 runuser -l lied -c 'mkdir -p $HOME/.config/Kvantum && echo -e "[General]\ntheme=Catppuccin-Mocha" > $HOME/.config/Kvantum/kvantum.kvconfig'
 
-# Hyprland config
+# ---- Hyprland config ----
 log "Creating Hyprland configuration..."
 runuser -l lied -c 'mkdir -p $HOME/.config/hypr $HOME/Pictures/Wallpapers'
 runuser -l lied -c 'curl -fsSL -o $HOME/Pictures/Wallpapers/anime-dark-1.jpg https://images.unsplash.com/photo-1519681393784-d120267933ba?q=80&w=2560&auto=format&fit=crop'
@@ -352,6 +365,7 @@ HPAPER_EOF
 '
 runuser -l lied -c 'cat > $HOME/.config/hypr/hyprland.conf <<'"'"'HYPR_EOF'"'"'
 monitor=,preferred,auto,1
+
 env = XDG_CURRENT_DESKTOP,Hyprland
 env = XDG_SESSION_TYPE,wayland
 env = QT_QPA_PLATFORM,wayland
@@ -363,16 +377,54 @@ env = MOZ_ENABLE_WAYLAND,1
 env = __GL_GSYNC_ALLOWED,1
 env = __GL_VRR_ALLOWED,1
 env = GBM_BACKEND,nvidia-drm
-input { kb_layout = gb; follow_mouse = 1; sensitivity = 0; accel_profile = flat; touchpad { natural_scroll = true } }
-general { gaps_in = 8; gaps_out = 16; border_size = 3; col.active_border = rgba(89b4faee) rgba(74c7ecaa) 45deg; col.inactive_border = rgba(181825aa); layout = master }
-decoration { rounding = 12; blur { enabled = true; size = 8; passes = 2; noise = 0.02 } drop_shadow = true; shadow_range = 20; shadow_render_power = 3 }
-animations { enabled = true; bezier = smooth, 0.05, 0.9, 0.1, 1.0; animation = windows, 1, 6, smooth, slide; animation = border, 1, 10, smooth; animation = fade, 1, 6, smooth; animation = workspaces, 1, 5, smooth, slide }
+# env = WLR_NO_HARDWARE_CURSORS,1  # uncomment if you see cursor issues
+
+input {
+    kb_layout = gb
+    follow_mouse = 1
+    touchpad { natural_scroll = true }
+    sensitivity = 0
+    accel_profile = flat
+}
+
+general {
+    gaps_in = 8
+    gaps_out = 16
+    border_size = 3
+    col.active_border = rgba(89b4faee) rgba(74c7ecaa) 45deg
+    col.inactive_border = rgba(181825aa)
+    layout = master
+}
+
+decoration {
+    rounding = 12
+    blur {
+        enabled = true
+        size = 8
+        passes = 2
+        noise = 0.02
+    }
+    drop_shadow = true
+    shadow_range = 20
+    shadow_render_power = 3
+}
+
+animations {
+    enabled = true
+    bezier = smooth, 0.05, 0.9, 0.1, 1.0
+    animation = windows, 1, 6, smooth, slide
+    animation = border, 1, 10, smooth
+    animation = fade, 1, 6, smooth
+    animation = workspaces, 1, 5, smooth, slide
+}
+
 exec-once = hyprpaper
 exec-once = hypridle
 exec-once = nm-applet --indicator
 exec-once = blueman-applet
 exec-once = /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1
 exec-once = fastfetch
+
 bind = SUPER, Return, exec, ghostty
 bind = SUPER, C, killactive,
 bind = SUPER, M, exit,
@@ -385,7 +437,7 @@ bind = SUPER, V, exec, cliphist list | wofi --dmenu | wl-copy
 HYPR_EOF
 '
 
-# Ghostty
+# ---- Ghostty ----
 runuser -l lied -c 'mkdir -p $HOME/.config/ghostty'
 runuser -l lied -c 'cat > $HOME/.config/ghostty/config <<'"'"'GHOSTTY_EOF'"'"'
 font-family = JetBrainsMono Nerd Font
@@ -398,7 +450,7 @@ shell-integration = zsh
 GHOSTTY_EOF
 '
 
-# Zsh
+# ---- Zsh ----
 runuser -l lied -c 'cat > $HOME/.zshrc <<'"'"'ZSHRC_EOF'"'"'
 export ZDOTDIR="$HOME"
 export EDITOR=nvim
@@ -420,7 +472,7 @@ alias grep="rg"
 ZSHRC_EOF
 '
 
-# MangoHud
+# ---- MangoHud ----
 runuser -l lied -c 'mkdir -p $HOME/.config/MangoHud'
 runuser -l lied -c 'cat > $HOME/.config/MangoHud/MangoHud.conf <<'"'"'MH_EOF'"'"'
 fps
@@ -443,7 +495,7 @@ toggle_hud=Shift_R+F12
 MH_EOF
 '
 
-# vkBasalt
+# ---- vkBasalt ----
 runuser -l lied -c 'mkdir -p $HOME/.config/vkBasalt'
 runuser -l lied -c 'cat > $HOME/.config/vkBasalt/vkBasalt.conf <<'"'"'VKB_EOF'"'"'
 effects = cas
@@ -451,14 +503,54 @@ casSharpness = 0.2
 VKB_EOF
 '
 
-# Default shell only if zsh exists
+# ---- Default shell (guarded) ----
 if [[ -x /bin/zsh ]]; then
   chsh -s /bin/zsh lied || warn "Could not set zsh as default shell (non-fatal)."
 else
   warn "zsh not found at /bin/zsh; skipping chsh."
 fi
 
-# Remove temporary NOPASSWD rule
+# ---- Cleanup sudoers temp ----
 rm -f /etc/sudoers.d/99_wheel_nopasswd || true
 
-log "Stage 2 complete."
+# ---- NVIDIA quick sanity check ----
+verify_nvidia() {
+  echo
+  echo "[NV] Verifying NVIDIA driver…"
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    warn "nvidia-smi not found. Driver may not be installed."
+    return
+  fi
+  if ! nvidia-smi >/dev/null 2>&1; then
+    warn "nvidia-smi failed to run. Check DKMS build/logs."
+  else
+    log "nvidia-smi OK — driver loaded."
+  fi
+  if ! lsmod | grep -q '^nvidia'; then
+    warn "nvidia kernel module not loaded."
+  fi
+  if ! grep -q 'nvidia_drm.modeset=1' /proc/cmdline 2>/dev/null; then
+    warn "kernel cmdline missing nvidia_drm.modeset=1 (KMS)."
+  fi
+}
+verify_nvidia
+
+# ---- Final summary + reboot prompt ----
+echo
+echo "========================================"
+echo "Logs saved to: $LOGFILE"
+if [[ "$WARNINGS" -gt 0 ]]; then
+  echo -e "⚠  ${YELLOW}Installation completed with $WARNINGS warning(s).${NC}"
+  echo -e "   Review [WARN] lines above before rebooting."
+else
+  echo -e "✅ ${GREEN}Installation completed successfully with no warnings.${NC}"
+fi
+echo "========================================"
+echo
+read -rp "Press Y to reboot now, or any other key to stay in shell: " confirm
+if [[ "$confirm" =~ ^[Yy]$ ]]; then
+  log "Rebooting..."
+  reboot
+else
+  log "You chose not to reboot. You can manually reboot later."
+fi
