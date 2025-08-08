@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# Arch Linux ZEN Gaming Auto-Installer — single file (FIXED)
+# Arch Linux ZEN Gaming Auto-Installer — single file (mkinitcpio fixed)
 # ============================================================
 
 set -Eeuo pipefail
@@ -59,13 +59,13 @@ log "Entering target system (this will look continuous)…"
 arch-chroot /mnt /bin/bash <<'CHROOT'
 set -Eeuo pipefail
 
-# ---- enable multilib first, then hard refresh ----
+# ---- enable multilib then refresh ----
 if ! grep -Eq '^\s*\[multilib\]' /etc/pacman.conf; then
   printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >> /etc/pacman.conf
 fi
 pacman -Syyu --noconfirm
 
-# ---- ensure mkinitcpio exists and has a base config ----
+# ---- ensure mkinitcpio is present and has a base config (fix for line 59/68 issue) ----
 pacman -S --noconfirm mkinitcpio
 [[ -f /etc/mkinitcpio.conf ]] || install -Dm644 /usr/share/mkinitcpio/mkinitcpio.conf /etc/mkinitcpio.conf || true
 
@@ -89,59 +89,43 @@ else
 fi
 echo "lied ALL=(ALL) ALL" >> /etc/sudoers
 
-# ---- Install kernel and headers FIRST (prevent fallback generation) ----
-# First, ensure the preset exists to prevent fallback
+# ---- pre-create NO-FALLBACK preset, then install kernel ----
 mkdir -p /etc/mkinitcpio.d
 cat > /etc/mkinitcpio.d/linux-zen.preset <<'PRESET'
-# mkinitcpio preset file for the 'linux-zen' package
-# NO FALLBACK IMAGE
-
+# mkinitcpio preset file for the 'linux-zen' package — NO FALLBACK IMAGE
 ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="/boot/vmlinuz-linux-zen"
-ALL_microcode=(/boot/*-ucode.img)
-
 PRESETS=('default')
-
 default_image="/boot/initramfs-linux-zen.img"
-default_options=""
-
-# Explicitly NO fallback preset
 PRESET
 
-# Now install kernel (it won't create fallback because preset already exists)
+# Install kernel/headers *after* preset exists to avoid fallback
 pacman -S --noconfirm linux-zen linux-zen-headers
 
-# ---- NVIDIA KMS + mkinitcpio via drop-in (AFTER kernel install) ----
-mkdir -p /etc/mkinitcpio.conf.d
+# ---- NVIDIA KMS + mkinitcpio drop-in ----
+mkdir -p /etc/modprobe.d /etc/mkinitcpio.conf.d
 cat > /etc/mkinitcpio.conf.d/90-nvidia.conf <<'EOF'
 MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)
 HOOKS=(base udev autodetect microcode modconf kms keyboard keymap filesystems fsck)
 EOF
-
 echo "options nvidia_drm modeset=1 fbdev=1" > /etc/modprobe.d/nvidia-kms.conf
 cat > /etc/modprobe.d/blacklist-nouveau.conf <<'BL'
 blacklist nouveau
 options nouveau modeset=0
 BL
 
-# ---- Ensure preset still has NO fallback (in case kernel install modified it) ----
+# Reassert no-fallback preset (some package hooks rewrite it)
 cat > /etc/mkinitcpio.d/linux-zen.preset <<'PRESET'
-# mkinitcpio preset file for the 'linux-zen' package
-# NO FALLBACK IMAGE
-
+# mkinitcpio preset file for the 'linux-zen' package — NO FALLBACK IMAGE
 ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="/boot/vmlinuz-linux-zen"
-ALL_microcode=(/boot/*-ucode.img)
-
 PRESETS=('default')
-
 default_image="/boot/initramfs-linux-zen.img"
-default_options=""
-
-# Explicitly NO fallback preset
 PRESET
 
-# ---- official repo packages (NVIDIA after kernel) ----
+# Clean any stray fallback and build initramfs
+rm -f /boot/initramfs-linux-zen-fallback.img
+mkinitcpio -P
+
+# ---- official repo packages ----
 pacman -S --noconfirm \
   intel-ucode \
   nvidia-dkms nvidia-utils nvidia-settings lib32-nvidia-utils \
@@ -166,14 +150,8 @@ pacman -S --noconfirm \
   cpupower lm_sensors thermald irqbalance zram-generator avahi nss-mdns \
   mako kanshi hypridle openssh iperf3 yt-dlp aria2 samba smbclient
 
-# remove wofi if installed
+# remove wofi (we’ll use rofi-wayland from AUR)
 pacman -Q wofi &>/dev/null && pacman -Rns --noconfirm wofi || true
-
-# ---- Regenerate initramfs with NVIDIA modules (NO FALLBACK) ----
-# Clean up any fallback images that might have been created
-rm -f /boot/initramfs-linux-zen-fallback.img
-# Regenerate with our preset that has no fallback
-mkinitcpio -P
 
 # ---- systemd-boot + fallback BOOTX64.EFI + set BootOrder ----
 bootctl install --esp-path=/boot || true
@@ -344,123 +322,6 @@ G
 
 cat > /home/lied/.local/bin/discord-wayland <<'D'
 #!/bin/bash
-exec /usr/bin/discord --enable-features=UseOzonePlatform,WebRTCPipeWireCapturer,WaylandWindowDecorations --ozone-platform=wayland "$@"
-D
-chmod +x /home/lied/.local/bin/discord-wayland
-
-cat > /home/lied/.local/share/applications/discord.desktop <<'DD'
-[Desktop Entry]
-Name=Discord
-Comment=Discord (Wayland)
-Exec=/home/lied/.local/bin/discord-wayland
-Terminal=false
-Type=Application
-Icon=discord
-Categories=Network;InstantMessaging;
-StartupWMClass=discord
-X-GNOME-UsesNotifications=true
-DD
-
-# zsh defaults with performance optimizations
-cat > /home/lied/.zshrc <<'Z'
-export ZDOTDIR="$HOME"
-export EDITOR=nano
-export BROWSER=firefox
-
-# Enable Powerlevel10k instant prompt
-if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
-  source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
-fi
-
-# History optimizations for 64GB RAM
-HISTSIZE=1000000
-SAVEHIST=1000000
-HISTFILE=$HOME/.zsh_history
-setopt EXTENDED_HISTORY
-setopt HIST_EXPIRE_DUPS_FIRST
-setopt HIST_IGNORE_DUPS
-setopt HIST_IGNORE_ALL_DUPS
-setopt HIST_IGNORE_SPACE
-setopt HIST_FIND_NO_DUPS
-setopt HIST_SAVE_NO_DUPS
-setopt SHARE_HISTORY
-
-# Performance optimizations
-autoload -Uz compinit
-if [[ -n ${ZDOTDIR}/.zcompdump(#qN.mh+24) ]]; then
-  compinit
-else
-  compinit -C
-fi
-
-# Better completion
-setopt AUTO_MENU
-setopt AUTO_LIST
-setopt COMPLETE_IN_WORD
-setopt ALWAYS_TO_END
-setopt MENU_COMPLETE
-
-# Load plugins
-source /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh
-source /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
-[ -f /usr/share/fzf/key-bindings.zsh ] && source /usr/share/fzf/key-bindings.zsh
-[ -f /usr/share/fzf/completion.zsh ] && source /usr/share/fzf/completion.zsh
-
-# Initialize tools
-eval "$(starship init zsh)"
-eval "$(zoxide init zsh)"
-
-# Aliases for better defaults
-alias ls='eza --icons --group-directories-first'
-alias ll='eza -lh --icons --group-directories-first'
-alias la='eza -lah --icons --group-directories-first'
-alias tree='eza --tree --icons'
-alias cat='bat'
-alias grep='rg'
-alias find='fd'
-alias ps='procs'
-alias top='btop'
-alias vim='nano'
-
-# Gaming aliases
-alias gamemode='gamemoderun'
-alias fps='mangohud'
-alias wine32='WINEARCH=win32 WINEPREFIX=~/.wine32 wine'
-alias wine64='WINEARCH=win64 WINEPREFIX=~/.wine64 wine'
-
-# System maintenance
-alias update='yay -Syu'
-alias cleanup='yay -Sc && sudo journalctl --vacuum-time=7d'
-alias nvidia-smi='watch -n 1 nvidia-smi'
-
-# Performance monitoring
-alias cpu-watch='watch -n 1 "grep \"^[c]pu MHz\" /proc/cpuinfo"'
-alias temp-watch='watch -n 1 sensors'
-
-# Development
-export MAKEFLAGS="-j32"
-export CARGO_BUILD_JOBS=32
-export NODE_OPTIONS="--max-old-space-size=16384"
-Z
-
-# Ghostty config
-cat > /home/lied/.config/ghostty/config <<'G'
-font-family = JetBrainsMono Nerd Font
-font-size = 12
-cursor-style = beam
-cursor-blink = true
-window-padding-x = 10
-window-padding-y = 10
-theme = Catppuccin-Mocha
-shell-integration = zsh
-copy-on-select = true
-gtk-single-instance = true
-background-opacity = 0.95
-G
-
-# Discord Wayland wrapper
-cat > /home/lied/.local/bin/discord-wayland <<'D'
-#!/bin/bash
 exec /usr/bin/discord \
   --enable-features=UseOzonePlatform,WebRTCPipeWireCapturer,WaylandWindowDecorations,VaapiVideoDecoder \
   --ozone-platform=wayland \
@@ -485,75 +346,21 @@ StartupWMClass=discord
 X-GNOME-UsesNotifications=true
 DD
 
-# Gaming launcher script
-cat > /home/lied/.local/bin/game-launch <<'GL'
-#!/bin/bash
-# Optimized game launcher for 13900KS + 4090
-export __GL_SHADER_DISK_CACHE=1
-export __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1
-export __GL_THREADED_OPTIMIZATIONS=1
-export __GL_MaxFramesAllowed=1
-export __GL_SYNC_TO_VBLANK=0
-export WINE_CPU_TOPOLOGY=8:16
-export WINE_LARGE_ADDRESS_AWARE=1
-export STAGING_SHARED_MEMORY=1
-export STAGING_WRITECOPY=1
-export RADV_PERFTEST=nggc,sam,ngg_streamout
-export mesa_glthread=true
-export DXVK_HUD=compiler
-export MANGOHUD=1
-export MANGOHUD_CONFIG=cpu_temp,gpu_temp,cpu_power,gpu_power,ram,vram,frametime,fps_limit=0
-
-# Set CPU to performance mode
-sudo cpupower frequency-set -g performance
-
-# Launch with gamemode
-exec gamemoderun "$@"
-GL
-chmod +x /home/lied/.local/bin/game-launch
-
-# MangoHud config
+# MangoHud config (optional theme)
 mkdir -p /home/lied/.config/MangoHud
 cat > /home/lied/.config/MangoHud/MangoHud.conf <<'MH'
-# 4090 + 13900KS optimized
 toggle_hud=F12
-toggle_fps_limit=Shift_L+F1
-
-# Display
 fps
-fps_limit=0
 frametime
-frame_timing=1
-cpu_stats
 cpu_temp
-cpu_power
 cpu_mhz
-gpu_stats
 gpu_temp
-gpu_power
 gpu_core_clock
-gpu_mem_clock
 vram
 ram
-vulkan_driver
-gamemode
-wine
-
-# Position
-position=top-left
-offset_x=10
-offset_y=10
-width=320
+position=top-right
+background_alpha=0.3
 font_size=20
-
-# Colors (Catppuccin theme)
-background_alpha=0.4
-background_color=1E1E2E
-text_color=CDD6F4
-gpu_color=89B4FA
-cpu_color=F38BA8
-vram_color=A6E3A1
-ram_color=F9E2AF
 MH
 
 # Fix ownership of user configs
