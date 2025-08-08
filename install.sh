@@ -68,8 +68,10 @@ log "Entering target system (this will look continuous)…"
 arch-chroot /mnt /bin/bash <<'CHROOT'
 set -Eeuo pipefail
 
-# ---- enable multilib first, then hard refresh ----
-sed -i '/^\[multilib\]/,/^Include/s/^#//' /etc/pacman.conf
+# ---- enable multilib first, then hard refresh (robust) ----
+if ! grep -Eq '^\s*\[multilib\]' /etc/pacman.conf; then
+  printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >> /etc/pacman.conf
+fi
 pacman -Syyu --noconfirm
 
 # ---- system basics ----
