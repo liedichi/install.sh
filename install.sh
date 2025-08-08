@@ -131,7 +131,7 @@ pacman -S --noconfirm \
   base-devel linux-zen linux-zen-headers linux-firmware intel-ucode \
   nvidia-dkms nvidia-utils lib32-nvidia-utils nvidia-settings \
   wayland wayland-protocols xdg-utils xdg-user-dirs \
-  xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-hyprland \
+  xdg-desktop-portal xdg-desktop-portal-hyprland \
   xorg-xwayland hyprland hyprpaper hyprcursor \
   wl-clipboard grim slurp swappy wf-recorder \
   pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber pavucontrol \
@@ -153,6 +153,11 @@ pacman -S --noconfirm \
   mangohud lib32-mangohud vkbasalt lib32-vkbasalt gamescope goverlay obs-studio nvtop \
   flatpak ntfs-3g nvme-cli xfsprogs btrfs-progs dosfstools \
   cpupower lm_sensors thermald irqbalance zram-generator avahi nfs-utils
+
+# safety: if GTK portal somehow got pulled in, remove it to avoid portal conflicts
+if pacman -Q xdg-desktop-portal-gtk &>/dev/null; then
+  pacman -Rns --noconfirm xdg-desktop-portal-gtk || true
+fi
 
 runuser -l lied -c 'xdg-user-dirs-update'
 
@@ -233,6 +238,8 @@ systemctl enable avahi-daemon.service
 systemctl enable cpupower.service || true
 systemctl enable nvidia-persistenced.service || true
 systemctl enable nvidia-powerd.service || true
+# optional: boot to graphical by default
+systemctl set-default graphical.target
 
 # ---------- perf tuning ----------
 log "Applying sysctl/IO/CPU tuning"
@@ -257,10 +264,11 @@ ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/scheduler}="none"
 ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/scheduler}="mq-deadline"
 EOF
 
-# ---------- SDDM theme ----------
+# ---------- SDDM theme (robust fallback) ----------
 mkdir -p /etc/sddm.conf.d
-THEME=catppuccin-mocha
-[[ -d "/usr/share/sddm/themes/Catppuccin-Mocha" ]] && THEME=Catppuccin-Mocha
+THEME="elarun"
+[[ -d "/usr/share/sddm/themes/catppuccin-mocha" ]] && THEME="catppuccin-mocha"
+[[ -d "/usr/share/sddm/themes/Catppuccin-Mocha" ]] && THEME="Catppuccin-Mocha"
 cat > /etc/sddm.conf.d/theme.conf <<EOF
 [Theme]
 Current=$THEME
