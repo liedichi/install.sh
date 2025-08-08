@@ -34,7 +34,8 @@ exec > >(tee -a "$LOGFILE") 2>&1
 # ============================================================
 # STAGE A (ISO): partition + base install → chroot and re-run
 # ============================================================
-if [[ "$IN_ISO" == 1 && "$IN_INSTALLED" == 0 ]]; then
+# FIX: always do Stage A when on the ISO (even if /etc/arch-release exists)
+if [[ "$IN_ISO" == 1 ]]; then
   log "Running on Arch ISO — Stage A (partition + base install)."
 
   [[ -n "${INSTALL_DISK:-}" ]] || die "Set INSTALL_DISK (e.g. INSTALL_DISK=/dev/nvme0n1)."
@@ -77,6 +78,10 @@ if [[ "$IN_ISO" == 1 && "$IN_INSTALLED" == 0 ]]; then
   cp -f "$LOGFILE" /mnt/var/log/installer.log || true
   install -Dm755 "$0" /mnt/root/install.sh
 
+  # FIX: ensure DNS works inside chroot
+  mkdir -p /mnt/etc
+  cp -L /etc/resolv.conf /mnt/etc/resolv.conf || true
+
   log "Chrooting to continue (Stage B)…"
   arch-chroot /mnt /bin/bash /root/install.sh
 
@@ -98,7 +103,7 @@ EOF
 locale-gen
 echo "LANG=en_GB.UTF-8" > /etc/locale.conf
 echo "KEYMAP=uk" > /etc/vconsole.conf
-ln -sf /usr/share/zoneinfo/Europe/London /etc/localtime
+ln -sf /usr/share/zoneinfo/GB /etc/localtime
 hwclock --systohc
 
 # ---------- user + passwords (interactive) ----------
