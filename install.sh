@@ -4,46 +4,34 @@
 # Optimized for: Intel i9-13900KS + RTX 4090 + 64GB RAM + Dual Monitors
 # =============================================================================
 
-set -e  # Exit on any error
+set -Eeuo pipefail
+trap 'echo -e "\033[0;31m[ERROR]\033[0m Failed at line $LINENO"; exit 1' ERR
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# Colors
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-# Logging helpers
-log()    { echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1"; }
-error()  { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-warning(){ echo -e "${YELLOW}[WARNING]${NC} $1"; }
-info()   { echo -e "${BLUE}[INFO]${NC} $1"; }
+# Logging + warnings counter
+WARNINGS=0
+log()  { echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $*"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $*"; ((WARNINGS++)); }
+die()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
-# -------- Stage selection (patched) --------
-# Prefer explicit flag; else auto-detect archiso by /run/archiso.
+# -------- Stage selection (explicit flag preferred) --------
 MODE=""
 case "${1:-}" in
   --stage1) MODE=stage1; shift ;;
   --stage2) MODE=stage2; shift ;;
 esac
 if [[ -z "$MODE" ]]; then
-  if [[ -d /run/archiso ]]; then
-    MODE=stage1    # We are in the live ISO
-  else
-    MODE=stage2    # We are in the installed system / chroot
-  fi
+  if [[ -d /run/archiso ]]; then MODE=stage1; else MODE=stage2; fi
 fi
 
 # -------- Stage 1: run only from Live ISO --------
 if [[ "$MODE" == "stage1" ]]; then
   log "Running Stage 1 (Live ISO): Disk partitioning and base install"
 
-  if [[ -z "$INSTALL_DISK" ]]; then
-      error "Environment variable INSTALL_DISK not set. Example: INSTALL_DISK=/dev/nvme0n1 bash install.sh --stage1"
-  fi
-  if [[ ! -b "$INSTALL_DISK" ]]; then
-      error "Block device $INSTALL_DISK not found"
-  fi
+  [[ -n "${INSTALL_DISK:-}" ]] || die "Set INSTALL_DISK (e.g. INSTALL_DISK=/dev/nvme0n1)"
+  [[ -b "$INSTALL_DISK"      ]] || die "Block device $INSTALL_DISK not found"
 
   timedatectl set-ntp true || true
 
@@ -56,11 +44,9 @@ if [[ "$MODE" == "stage1" ]]; then
   sgdisk -n 2:0:0     -t 2:8300 -c 2:"Arch Linux" "$INSTALL_DISK"
 
   if [[ "$INSTALL_DISK" =~ nvme|mmcblk ]]; then
-      EFI_PART="${INSTALL_DISK}p1"
-      ROOT_PART="${INSTALL_DISK}p2"
+    EFI_PART="${INSTALL_DISK}p1"; ROOT_PART="${INSTALL_DISK}p2"
   else
-      EFI_PART="${INSTALL_DISK}1"
-      ROOT_PART="${INSTALL_DISK}2"
+    EFI_PART="${INSTALL_DISK}1";  ROOT_PART="${INSTALL_DISK}2"
   fi
 
   log "Formatting EFI ($EFI_PART) as FAT32 and ROOT ($ROOT_PART) as XFS"
@@ -73,17 +59,37 @@ if [[ "$MODE" == "stage1" ]]; then
   mount "$EFI_PART" /mnt/boot
 
   log "Installing base system with linux-zen kernel"
-  pacstrap -K /mnt base base-devel linux-zen linux-zen-headers linux-firmware networkmanager sudo neovim git efibootmgr
+  pacstrap -K /mnt base base-devel linux-zen linux-zen-headers linux-firmware \
+    networkmanager sudo neovim git efibootmgr
 
-  log "Generating fstab"
+  log "Generating fstab (noatime)"
   genfstab -U /mnt >> /mnt/etc/fstab
-  sed -i 's/relatime/noatime/g' /mnt/etc/fstab || true
+  sed -i 's/\<relatime\>/noatime/g' /mnt/etc/fstab || true
 
-  log "Copying installer into target and entering chroot (Stage 2)"
-  install -Dm755 "$0" /mnt/root/install.sh
-  arch-chroot /mnt /bin/bash /root/install.sh --stage2
+  log "Copying this script into target and entering chroot (Stage 2)"
+  cat "$0" > /mnt/root/install.sh
+  chmod +x /mnt/root/install.sh
 
-  log "Stage 2 finished. You can now reboot."
+  arch-chroot /mnt /bin/bash -c "/root/install.sh --stage2"
+
+  # Final summary + reboot prompt after returning from Stage 2
+  echo
+  echo "========================================"
+  if [[ "$WARNINGS" -gt 0 ]]; then
+      echo -e "⚠  ${YELLOW}Installation completed with $WARNINGS warning(s).${NC}"
+      echo -e "   Review [WARN] messages above before rebooting."
+  else
+      echo -e "✅ ${GREEN}Installation completed successfully with no warnings.${NC}"
+  fi
+  echo "========================================"
+  echo
+  read -rp "Press Y to reboot now, or any other key to stay in shell: " confirm
+  if [[ "$confirm" =~ ^[Yy]$ ]]; then
+      log "Rebooting..."
+      reboot
+  else
+      log "You chose not to reboot. You can manually reboot later."
+  fi
   exit 0
 fi
 
@@ -93,12 +99,10 @@ log "Starting Arch Linux Zen Gaming Auto-Install Script (Stage 2)"
 # =============================================================================
 # SYSTEM CONFIGURATION
 # =============================================================================
-
 log "Configuring system settings..."
-
 echo "gaming-rig" > /etc/hostname
 
-cat > /etc/locale.gen << 'EOF'
+cat > /etc/locale.gen <<'EOF'
 en_GB.UTF-8 UTF-8
 EOF
 locale-gen
@@ -110,21 +114,20 @@ hwclock --systohc
 # =============================================================================
 # BOOTLOADER CONFIGURATION
 # =============================================================================
-
 log "Configuring systemd-boot..."
 bootctl install
 
-ROOT_DEVICE=$(findmnt -no SOURCE /)
-ROOT_PARTUUID=$(blkid -s PARTUUID -o value "$ROOT_DEVICE")
-ROOT_FSTYPE=$(findmnt -no FSTYPE /)
+ROOT_DEVICE="$(findmnt -no SOURCE /)"
+ROOT_PARTUUID="$(blkid -s PARTUUID -o value "$ROOT_DEVICE")"
+ROOT_FSTYPE="$(findmnt -no FSTYPE /)"
 
-cat > /boot/loader/loader.conf << 'EOF'
+cat > /boot/loader/loader.conf <<'EOF'
 timeout 0
 default arch-linux-zen
 editor no
 EOF
 
-cat > /boot/loader/entries/arch-linux-zen.conf << EOF
+cat > /boot/loader/entries/arch-linux-zen.conf <<EOF
 title Arch Linux Zen (Gaming)
 linux /vmlinuz-linux-zen
 initrd /intel-ucode.img
@@ -135,72 +138,70 @@ EOF
 # =============================================================================
 # NETWORK CONFIGURATION
 # =============================================================================
-
 log "Configuring network..."
 systemctl enable NetworkManager.service
 
 # =============================================================================
 # USER CREATION
 # =============================================================================
-
 log "Creating user account..."
-useradd -m -G wheel,audio,video,storage,power,network,optical,scanner,rfkill -s /bin/bash lied
+id -u lied &>/dev/null || useradd -m -G wheel,audio,video,storage,power,network,optical,scanner,rfkill -s /bin/bash lied
 echo "lied:625816" | chpasswd
 echo "lied ALL=(ALL) ALL" >> /etc/sudoers
 
 # =============================================================================
 # PACKAGE INSTALLATION
 # =============================================================================
-
 log "Installing base packages..."
 pacman -Syu --noconfirm
 pacman -S --noconfirm \
-    base-devel \
-    linux-zen linux-zen-headers linux-firmware intel-ucode \
-    nvidia-dkms nvidia-utils lib32-nvidia-utils nvidia-settings \
-    wayland wayland-protocols xdg-utils xdg-user-dirs \
-    xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-hyprland \
-    xorg-xwayland hyprland hyprpaper hyprcursor \
-    wl-clipboard grim slurp swappy wf-recorder \
-    pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber pavucontrol \
-    networkmanager \
-    network-manager-applet \
-    bluez bluez-utils blueman \
-    polkit-gnome sddm \
-    firefox discord \
-    thunar thunar-archive-plugin file-roller \
-    wofi cliphist hypridle hyprlock \
-    thunar-volman tumbler ffmpegthumbnailer gvfs gvfs-mtp udisks2 polkit \
-    neovim git curl wget unzip unrar p7zip rsync htop fastfetch fzf ripgrep fd bat eza tree \
-    zsh starship zsh-autosuggestions zsh-syntax-highlighting \
-    ttf-jetbrains-mono-nerd noto-fonts noto-fonts-cjk noto-fonts-emoji ttf-dejavu ttf-liberation ttf-roboto \
-    papirus-icon-theme gtk3 gtk4 qt6-base qt6-wayland qt5-base qt5-wayland kvantum \
-    gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav \
-    gst-vaapi libva libva-utils vulkan-icd-loader vulkan-tools vulkan-nvidia \
-    lib32-vulkan-icd-loader lib32-vulkan-nvidia \
-    steam wine wine-mono wine-gecko lutris protontricks gamemode lib32-gamemode \
-    mangohud lib32-mangohud vkbasalt lib32-vkbasalt gamescope goverlay obs-studio nvtop \
-    flatpak ntfs-3g nvme-cli xfsprogs btrfs-progs dosfstools \
-    cpupower lm_sensors thermald irqbalance zram-generator avahi nfs-utils
+  base-devel \
+  linux-zen linux-zen-headers linux-firmware intel-ucode \
+  nvidia-dkms nvidia-utils lib32-nvidia-utils nvidia-settings \
+  wayland wayland-protocols xdg-utils xdg-user-dirs \
+  xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-hyprland \
+  xorg-xwayland hyprland hyprpaper hyprcursor \
+  wl-clipboard grim slurp swappy wf-recorder \
+  pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber pavucontrol \
+  networkmanager \
+  network-manager-applet \
+  bluez bluez-utils blueman \
+  polkit-gnome sddm \
+  firefox discord \
+  thunar thunar-archive-plugin file-roller \
+  wofi cliphist hypridle hyprlock \
+  thunar-volman tumbler ffmpegthumbnailer gvfs gvfs-mtp udisks2 polkit \
+  neovim git curl wget unzip unrar p7zip rsync htop fastfetch fzf ripgrep fd bat eza tree \
+  zsh starship zsh-autosuggestions zsh-syntax-highlighting \
+  ttf-jetbrains-mono-nerd noto-fonts noto-fonts-cjk noto-fonts-emoji ttf-dejavu ttf-liberation ttf-roboto \
+  papirus-icon-theme gtk3 gtk4 qt6-base qt6-wayland qt5-base qt5-wayland kvantum \
+  gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav \
+  gst-vaapi libva libva-utils vulkan-icd-loader vulkan-tools vulkan-nvidia \
+  lib32-vulkan-icd-loader lib32-vulkan-nvidia \
+  steam wine wine-mono wine-gecko lutris protontricks gamemode lib32-gamemode \
+  mangohud lib32-mangohud vkbasalt lib32-vkbasalt gamescope goverlay obs-studio nvtop \
+  flatpak ntfs-3g nvme-cli xfsprogs btrfs-progs dosfstools \
+  cpupower lm_sensors thermald irqbalance zram-generator avahi nfs-utils
 
 runuser -l lied -c 'xdg-user-dirs-update'
 
-# NVIDIA early KMS and initramfs modules
+# NVIDIA early KMS + initramfs
 log "Configuring NVIDIA modules and initramfs..."
-if [ -f /etc/mkinitcpio.d/linux-zen.preset ]; then
+if [[ -f /etc/mkinitcpio.d/linux-zen.preset ]]; then
   sed -i "s/^PRESETS=.*/PRESETS=('default')/" /etc/mkinitcpio.d/linux-zen.preset || true
   sed -i '/^fallback_/d' /etc/mkinitcpio.d/linux-zen.preset || true
 fi
 sed -i 's/^MODULES=(/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm /' /etc/mkinitcpio.conf || true
 sed -i 's/^HOOKS=(.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap filesystems fsck)/' /etc/mkinitcpio.conf || true
 echo "options nvidia_drm modeset=1 fbdev=1" > /etc/modprobe.d/nvidia-kms.conf
-cat > /etc/modprobe.d/blacklist-nouveau.conf << 'BL_NOUVEAU'
+cat > /etc/modprobe.d/blacklist-nouveau.conf <<'BL_NOUVEAU'
 blacklist nouveau
 options nouveau modeset=0
 BL_NOUVEAU
 mkinitcpio -P
 
-cat > /etc/modprobe.d/nvidia-gaming.conf << 'NVIDIA_EOF'
+# Runtime NV tweaks
+cat > /etc/modprobe.d/nvidia-gaming.conf <<'NVIDIA_EOF'
 options nvidia NVreg_PreserveVideoMemoryAllocations=1
 options nvidia NVreg_UsePageAttributeTable=1
 NVIDIA_EOF
@@ -233,7 +234,7 @@ systemctl enable nvidia-powerd.service || true
 
 # Performance tuning
 log "Applying performance tuning..."
-cat > /etc/sysctl.d/99-gaming-tweaks.conf << 'SYSCTL_EOF'
+cat > /etc/sysctl.d/99-gaming-tweaks.conf <<'SYSCTL_EOF'
 vm.swappiness = 10
 vm.vfs_cache_pressure = 50
 kernel.sched_autogroup_enabled = 1
@@ -242,17 +243,17 @@ net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 SYSCTL_EOF
 
-cat > /etc/default/cpupower << 'CPUPOWER_EOF'
+cat > /etc/default/cpupower <<'CPUPOWER_EOF'
 governor="performance"
 CPUPOWER_EOF
 
-cat > /etc/systemd/zram-generator.conf << 'ZRAM_EOF'
+cat > /etc/systemd/zram-generator.conf <<'ZRAM_EOF'
 [zram0]
 zram-size = ram / 2
 compression-algorithm = zstd
 ZRAM_EOF
 
-cat > /etc/udev/rules.d/60-ioschedulers.rules << 'UDEV_EOF'
+cat > /etc/udev/rules.d/60-ioschedulers.rules <<'UDEV_EOF'
 ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/scheduler}="none"
 ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/scheduler}="mq-deadline"
 UDEV_EOF
@@ -260,14 +261,10 @@ UDEV_EOF
 # SDDM theming with fallback
 mkdir -p /etc/sddm.conf.d
 THEME_ID="catppuccin-mocha"
-if [ ! -d "/usr/share/sddm/themes/$THEME_ID" ]; then
-  if [ -d "/usr/share/sddm/themes/Catppuccin-Mocha" ]; then
-    THEME_ID="Catppuccin-Mocha"
-  else
-    THEME_ID="elarun"
-  fi
+if [[ ! -d "/usr/share/sddm/themes/$THEME_ID" ]]; then
+  if [[ -d "/usr/share/sddm/themes/Catppuccin-Mocha" ]]; then THEME_ID="Catppuccin-Mocha"; else THEME_ID="elarun"; fi
 fi
-cat > /etc/sddm.conf.d/theme.conf << SDDM_EOF
+cat > /etc/sddm.conf.d/theme.conf <<SDDM_EOF
 [Theme]
 Current=$THEME_ID
 SDDM_EOF
@@ -318,7 +315,7 @@ DISCORD_DESKTOP
 
 # Firefox system policies
 mkdir -p /usr/lib/firefox/distribution
-cat > /usr/lib/firefox/distribution/policies.json << 'FFPOLICY_EOF'
+cat > /usr/lib/firefox/distribution/policies.json <<'FFPOLICY_EOF'
 {
   "policies": {
     "Preferences": {
@@ -338,7 +335,7 @@ cat > /usr/lib/firefox/distribution/policies.json << 'FFPOLICY_EOF'
 }
 FFPOLICY_EOF
 
-# Qt theming via Kvantum and qt[5|6]ct
+# Qt theming
 pacman -S --needed --noconfirm qt6ct qt5ct
 runuser -l lied -c 'mkdir -p $HOME/.config && echo "[General]\nicon_theme=Papirus-Dark" > $HOME/.config/qt6ct.conf'
 runuser -l lied -c 'mkdir -p $HOME/.config && echo "[General]\nicon_theme=Papirus-Dark" > $HOME/.config/qt5ct.conf'
@@ -454,7 +451,14 @@ casSharpness = 0.2
 VKB_EOF
 '
 
-chsh -s /bin/zsh lied || true
+# Default shell only if zsh exists
+if [[ -x /bin/zsh ]]; then
+  chsh -s /bin/zsh lied || warn "Could not set zsh as default shell (non-fatal)."
+else
+  warn "zsh not found at /bin/zsh; skipping chsh."
+fi
+
+# Remove temporary NOPASSWD rule
 rm -f /etc/sudoers.d/99_wheel_nopasswd || true
 
-log "All tasks completed. You can now reboot into your optimized Hyprland gaming setup."
+log "Stage 2 complete."
